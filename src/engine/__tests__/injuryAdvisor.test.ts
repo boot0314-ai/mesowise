@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { createDefaultProfile } from '../../data/constants';
 import { BUILTIN_EXERCISES } from '../../data/exercises';
-import { assessExerciseSafety, recommendJointFriendlySwaps } from '../injuryAdvisor';
+import {
+  assessExerciseSafety,
+  optimizeSessionOrderForJoints,
+  recommendJointFriendlySwaps,
+} from '../injuryAdvisor';
 
 const byId = new Map(BUILTIN_EXERCISES.map((e) => [e.id, e]));
 
@@ -67,5 +71,59 @@ describe('Injury Advisor & High-SFR Swap Ranking', () => {
     expect(swaps[0].exercise.id).toBe('chest_supported_machine_row');
     expect(swaps.every((s) => profile.equipment.includes(s.exercise.equipment))).toBe(true);
     expect(swaps.every((s) => s.safety.level !== 'avoid')).toBe(true);
+  });
+
+  it('provides lengthened vs pain-free active ROM guidance and moves leg curls before leg press for joint warming', () => {
+    const profile = createDefaultProfile(); // 50_64
+    const cableFly = byId.get('cable_fly_seated')!;
+    const safeAssess = assessExerciseSafety(cableFly, profile);
+    expect(safeAssess.romGuidance).toContain('Lengthened-tension');
+    expect(safeAssess.finisherTip).toContain('Myo-reps');
+
+    profile.joints.knee = { status: 'sensitive', notes: 'Patellar ache', painBaseline: 2 };
+    const legExt = byId.get('seated_leg_extension')!;
+    const flaggedAssess = assessExerciseSafety(legExt, profile);
+    expect(flaggedAssess.romGuidance).toContain('Pain-free active ROM');
+
+    const reordered = optimizeSessionOrderForJoints(
+      [
+        {
+          id: 'e1',
+          exerciseId: 'leg_press_45',
+          muscle: 'quads',
+          progressionType: 'double',
+          targetMinReps: 12,
+          targetMaxReps: 18,
+          increment: 10,
+          startNumSets: 3,
+          numSets: 3,
+          lastWeight: 200,
+          weightIncreasedThisWeek: false,
+          sets: [],
+        },
+        {
+          id: 'e2',
+          exerciseId: 'seated_leg_curl',
+          muscle: 'hamstrings',
+          progressionType: 'double',
+          targetMinReps: 12,
+          targetMaxReps: 18,
+          increment: 5,
+          startNumSets: 3,
+          numSets: 3,
+          lastWeight: 100,
+          weightIncreasedThisWeek: false,
+          sets: [],
+        },
+      ],
+      BUILTIN_EXERCISES,
+      profile
+    );
+
+    expect(reordered.changed).toBe(true);
+    expect(reordered.exercises.map((e) => e.exerciseId)).toEqual([
+      'seated_leg_curl',
+      'leg_press_45',
+    ]);
   });
 });

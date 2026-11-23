@@ -160,6 +160,7 @@ export interface WorkoutSession {
   dayName: string;
   isDeload: boolean;
   isRecoverySession: boolean;
+  stiffToday?: boolean;
   targetRir: number;
   status: 'planned' | 'in_progress' | 'completed';
   startedAt?: string;
@@ -244,6 +245,8 @@ export interface SafetyAssessment {
   reasons: string[];
   tempoCue: string;
   repRangeShift: number;
+  romGuidance?: string;
+  finisherTip?: string;
 }
 
 export interface SwapCandidate {

@@ -1,7 +1,9 @@
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowRight,
   ArrowRightLeft,
+  ArrowUp,
   BatteryCharging,
   Check,
   ChevronDown,
@@ -9,6 +11,7 @@ import {
   Flame,
   Plus,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Sun,
 } from 'lucide-react';
@@ -20,8 +23,17 @@ import { SwapDrawer } from '../components/SwapDrawer';
 import { EQUIPMENT_LABELS, MUSCLE_LABELS } from '../data/constants';
 import { buildRecoverySession } from '../engine/deload';
 import { shouldSuggestDeloadOrRecovery } from '../engine/feedback';
-import { assessExerciseSafety, generateSessionBriefing } from '../engine/injuryAdvisor';
-import { evaluateAutoDownSet, generateWarmupSets } from '../engine/progression';
+import {
+  assessExerciseSafety,
+  generateSessionBriefing,
+  needsJointWarmingReorder,
+  optimizeSessionOrderForJoints,
+} from '../engine/injuryAdvisor';
+import {
+  evaluateAutoDownSet,
+  generateWarmupSets,
+  getRecommendedRestSeconds,
+} from '../engine/progression';
 import { getAgeAdjustedRepRange } from '../engine/rirAndMeso';
 import {
   AthleteProfile,
@@ -116,6 +128,11 @@ export function WorkoutScreen({
     );
   }, [activeSession, allExercises, profile, painHistory, deloadPrompt]);
 
+  const reorderHint = useMemo(() => {
+    if (!activeSession) return { recommended: false, summary: '' };
+    return needsJointWarmingReorder(activeSession, allExercises, profile);
+  }, [activeSession, allExercises, profile]);
+
   if (!meso || !activeSession) {
     return (
       <div className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
@@ -165,7 +182,7 @@ export function WorkoutScreen({
     }));
   };
 
-  const toggleSetComplete = (ex: SessionExercise, set: SetLog) => {
+  const toggleSetComplete = (ex: SessionExercise, set: SetLog, def: ExerciseDefinition) => {
     const nextCompleted = !set.completed;
     const fillWeight =
       set.weight ?? (set.targetWeight > 0 ? set.targetWeight : ex.lastWeight ?? 0);
@@ -181,8 +198,50 @@ export function WorkoutScreen({
     });
 
     if (nextCompleted && !set.isWarmup) {
-      onStartRestTimer(profile.defaultRestSec);
+      onStartRestTimer(getRecommendedRestSeconds(def, profile));
     }
+  };
+
+  const toggleStiffToday = () => {
+    const nextStiff = !activeSession.stiffToday;
+    const baseRir = activeSession.targetRir;
+    const bufferedRir = nextStiff ? Math.min(4, baseRir + 1) : baseRir;
+
+    onUpdateSession({
+      ...activeSession,
+      stiffToday: nextStiff,
+      exercises: activeSession.exercises.map((ex) => ({
+        ...ex,
+        sets: ex.sets.map((s) =>
+          s.completed || s.isWarmup ? s : { ...s, targetRir: bufferedRir }
+        ),
+      })),
+    });
+  };
+
+  const moveExercise = (index: number, delta: -1 | 1) => {
+    const nextIdx = index + delta;
+    if (nextIdx < 0 || nextIdx >= activeSession.exercises.length) return;
+    const reordered = [...activeSession.exercises];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(nextIdx, 0, moved);
+    onUpdateSession({
+      ...activeSession,
+      exercises: reordered,
+    });
+  };
+
+  const applyJointWarmingOrder = () => {
+    const result = optimizeSessionOrderForJoints(
+      activeSession.exercises,
+      allExercises,
+      profile
+    );
+    if (!result.changed) return;
+    onUpdateSession({
+      ...activeSession,
+      exercises: result.exercises,
+    });
   };
 
   const addDownSetFor = (ex: SessionExercise, afterSet: SetLog) => {
@@ -345,7 +404,7 @@ export function WorkoutScreen({
                 Week {meso.currentWeek} of {meso.totalWeeks}
               </span>
               <span className="rounded-full border border-slate-700 bg-[#0B0E14] px-2.5 py-0.5 text-[11px] font-bold text-slate-200 tabular-nums">
-                Target {activeSession.targetRir} RIR
+                Target {activeSession.stiffToday ? Math.min(4, activeSession.targetRir + 1) : activeSession.targetRir} RIR
               </span>
               {activeSession.isDeload && (
                 <span className="rounded-full bg-sky-500/20 px-2.5 py-0.5 text-[11px] font-bold text-sky-300">
@@ -357,9 +416,29 @@ export function WorkoutScreen({
                   Recovery
                 </span>
               )}
+              {!activeSession.isDeload &&
+                !activeSession.isRecoverySession &&
+                activeSession.status !== 'completed' && (
+                  <button
+                    type="button"
+                    onClick={toggleStiffToday}
+                    className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                      activeSession.stiffToday
+                        ? 'border-sky-400/60 bg-sky-500/20 text-sky-200'
+                        : 'border-slate-700 bg-[#0B0E14] text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {activeSession.stiffToday ? 'Stiff Today (+1 RIR On)' : 'Stiff Today (+1 RIR)'}
+                  </button>
+                )}
             </div>
             <h1 className="mt-2 text-lg font-bold text-white">{activeSession.dayName}</h1>
             <p className="text-xs text-slate-400">{meso.name}</p>
+            {activeSession.stiffToday && (
+              <p className="mt-1.5 rounded-xl border border-sky-500/30 bg-sky-500/10 px-2.5 py-1.5 text-[11px] text-sky-200">
+                Readiness buffer active: stopping 1 extra rep shy of failure protects tendons while preserving ~95% hypertrophy stimulus.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col items-end gap-1.5">
@@ -470,8 +549,25 @@ export function WorkoutScreen({
             )}
           </button>
 
-          {briefingOpen && (briefing.items.length > 0 || briefing.deloadPrompt) && (
+          {briefingOpen &&
+            (briefing.items.length > 0 || briefing.deloadPrompt || reorderHint.recommended) && (
             <div className="space-y-2 border-t border-[#1E2635] px-4 py-3">
+              {reorderHint.recommended && (
+                <div className="rounded-xl border border-sky-500/35 bg-sky-500/12 p-3 text-xs text-sky-100">
+                  <div className="flex items-center gap-1.5 font-bold text-sky-300">
+                    <ShieldCheck className="h-4 w-4" />
+                    Joint-Warming Order Available
+                  </div>
+                  <p className="mt-1 text-slate-300">{reorderHint.summary}</p>
+                  <button
+                    type="button"
+                    onClick={applyJointWarmingOrder}
+                    className="mt-2 rounded-lg bg-sky-500 px-3 py-1.5 text-[11px] font-bold text-slate-950"
+                  >
+                    Pre-Warm Order (Move Isolation/Curl First)
+                  </button>
+                </div>
+              )}
               {briefing.deloadPrompt && (
                 <div className="rounded-xl border border-amber-500/40 bg-amber-500/12 p-3 text-xs text-amber-200">
                   <div className="font-bold">Fatigue / Joint Check</div>
@@ -587,20 +683,40 @@ export function WorkoutScreen({
                     <h2 className="mt-1 text-base font-bold text-white">{def.name}</h2>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSwapTarget({
-                        sessionExerciseId: ex.id,
-                        exercise: def,
-                        painJoint: safety.affectedJoints[0] ?? maxPainSet?.painJoint,
-                      })
-                    }
-                    className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-slate-700 bg-[#0B0E14] px-3 text-xs font-semibold text-slate-200 hover:border-emerald-500/40 active:scale-95"
-                  >
-                    <ArrowRightLeft className="h-3.5 w-3.5 text-emerald-400" />
-                    Swap
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={exIndex === 0}
+                      onClick={() => moveExercise(exIndex, -1)}
+                      aria-label={`Move ${def.name} up`}
+                      className="flex h-10 w-8 items-center justify-center rounded-xl border border-slate-800 bg-[#0B0E14] text-slate-400 disabled:opacity-30"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={exIndex === activeSession.exercises.length - 1}
+                      onClick={() => moveExercise(exIndex, 1)}
+                      aria-label={`Move ${def.name} down`}
+                      className="flex h-10 w-8 items-center justify-center rounded-xl border border-slate-800 bg-[#0B0E14] text-slate-400 disabled:opacity-30"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSwapTarget({
+                          sessionExerciseId: ex.id,
+                          exercise: def,
+                          painJoint: safety.affectedJoints[0] ?? maxPainSet?.painJoint,
+                        })
+                      }
+                      className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-slate-700 bg-[#0B0E14] px-3 text-xs font-semibold text-slate-200 hover:border-emerald-500/40 active:scale-95"
+                    >
+                      <ArrowRightLeft className="h-3.5 w-3.5 text-emerald-400" />
+                      Swap
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -615,6 +731,19 @@ export function WorkoutScreen({
                   <span className="font-semibold text-slate-300">Tempo:</span>{' '}
                   {ex.eccentricOverride ?? def.eccentricCue}
                 </p>
+
+                {safety.romGuidance && (
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    <span className="font-semibold text-slate-300">ROM:</span>{' '}
+                    {safety.romGuidance}
+                  </p>
+                )}
+
+                {safety.finisherTip && (
+                  <p className="mt-1 text-[11px] text-emerald-300/90">
+                    {safety.finisherTip}
+                  </p>
+                )}
 
                 {ex.coachNote && (
                   <div className="mt-2 rounded-xl border border-slate-800 bg-[#0B0E14] px-3 py-2 text-xs text-slate-300">
@@ -668,7 +797,7 @@ export function WorkoutScreen({
                         </span>
                         <button
                           type="button"
-                          onClick={() => toggleSetComplete(ex, wu)}
+                          onClick={() => toggleSetComplete(ex, wu, def)}
                           className={`flex h-8 w-8 items-center justify-center rounded-lg border ${
                             wu.completed
                               ? 'border-emerald-500 bg-emerald-500 text-slate-950'
@@ -812,7 +941,7 @@ export function WorkoutScreen({
 
                           <button
                             type="button"
-                            onClick={() => toggleSetComplete(ex, set)}
+                            onClick={() => toggleSetComplete(ex, set, def)}
                             aria-label={`Complete set ${idx + 1}`}
                             className={`flex h-11 items-center justify-center rounded-xl border transition active:scale-95 ${
                               set.completed

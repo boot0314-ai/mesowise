@@ -86,3 +86,29 @@ export function getAdaptedLandmarks(
         : 'Standard RP hypertrophy landmarks.',
   };
 }
+
+const MAX_SESSION_SETS_BY_AGE: Record<AgeTier, number> = {
+  under_35: 10,
+  '35_49': 8,
+  '50_64': 6,
+  '65_plus': 5,
+};
+
+/**
+ * Returns the maximum productive working sets per muscle in a single session
+ * before local tendon/connective-tissue inflammation outpaces hypertrophic stimulus.
+ */
+export function getMaxSessionSetsPerMuscle(
+  profile: Pick<AthleteProfile, 'ageTier'>
+): number {
+  return MAX_SESSION_SETS_BY_AGE[profile.ageTier];
+}
+
+/**
+ * Returns the per-exercise working set cap for safe progressive volume.
+ */
+export function getMaxSetsPerExercise(
+  profile: Pick<AthleteProfile, 'ageTier'>
+): number {
+  return profile.ageTier === '50_64' || profile.ageTier === '65_plus' ? 5 : 6;
+}

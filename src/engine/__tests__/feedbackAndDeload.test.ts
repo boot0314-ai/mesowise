@@ -174,4 +174,60 @@ describe('Feedback Engine, Deload Automation & Meso Lifecycle', () => {
     const seededFirstEx = nextMeso.sessions[0].exercises[0];
     expect(seededFirstEx.lastWeight).toBe(175); // 200 * 0.875 = 175
   });
+
+  it('distributes weekly setsModifier once to highest-SFR exercise and caps per-session junk volume', () => {
+    const profile = createDefaultProfile(); // 50_64 -> max 6 sets/session per muscle
+    const tpl = MESO_TEMPLATES.find((t) => t.id === 'masters-upper-lower-4')!;
+    const meso = createMesocycleFromTemplate(
+      tpl,
+      { totalWeeks: 5 },
+      BUILTIN_EXERCISES,
+      profile
+    );
+
+    // Upper A has machine_chest_press (SFR 9.4, 3 sets); Upper B has machine_incline_press (SFR 9.5, 3 sets)
+    meso.sessions[0].status = 'completed';
+    meso.sessions[0].exercises[0].sets.forEach((s) => {
+      s.weight = 120;
+      s.reps = 12; // below ceiling so weight does not bump
+      s.rir = 2;
+      s.completed = true;
+    });
+    meso.sessions[2].status = 'completed';
+    meso.sessions[2].exercises[0].sets.forEach((s) => {
+      s.weight = 110;
+      s.reps = 12;
+      s.rir = 2;
+      s.completed = true;
+    });
+    // Also simulate a single-session over-prescription for quads (8 sets > cap 6)
+    meso.sessions[1].exercises.find((e) => e.muscle === 'quads')!.numSets = 8;
+
+    const chestFeedback = {
+      muscle: 'chest' as const,
+      soreness: 0 as const,
+      pump: 2 as const,
+      workload: 0 as const,
+      jointPainMax: 0,
+      v4Rating: 1 as const,
+      setsModifier: 1,
+      rationale: 'Add +1 chest set',
+    };
+    meso.sessions[0].feedback.chest = chestFeedback;
+    meso.sessions[2].feedback.chest = chestFeedback;
+
+    const week2 = advanceToNextWeek(meso, BUILTIN_EXERCISES, profile);
+    const w2Sessions = week2.sessions.filter((s) => s.weekNumber === 2);
+
+    const w2UpperAChest = w2Sessions[0].exercises.find((e) => e.muscle === 'chest')!;
+    const w2UpperBChest = w2Sessions[2].exercises.find((e) => e.muscle === 'chest')!;
+    // Total weekly chest sets went from 3+3=6 to 7 (+1 budget allocated once, favoring higher SFR Upper B)
+    expect(w2UpperAChest.numSets + w2UpperBChest.numSets).toBe(7);
+    expect(w2UpperBChest.numSets).toBe(4);
+    expect(w2UpperAChest.numSets).toBe(3);
+
+    // Single-session quad sets capped at 6 for 50_64
+    const w2Quads = w2Sessions[1].exercises.find((e) => e.muscle === 'quads')!;
+    expect(w2Quads.numSets).toBe(6);
+  });
 });

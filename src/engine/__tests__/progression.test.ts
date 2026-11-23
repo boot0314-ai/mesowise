@@ -7,6 +7,7 @@ import {
   convertWeight,
   evaluateAutoDownSet,
   generateWarmupSets,
+  getRecommendedRestSeconds,
   roundToIncrement,
 } from '../progression';
 
@@ -209,5 +210,49 @@ describe('Progression, Pain-Monitoring Traffic Lights & Auto Down-Sets', () => {
     const warmups = generateWarmupSets(200, 5, press, profile);
     expect(warmups.map((w) => w.targetWeight)).toEqual([100, 140, 170]);
     expect(warmups.every((w) => w.isWarmup)).toBe(true);
+  });
+
+  it('requires set consolidation before bumping weight for 50+ lifters and scales rest timers by exercise type', () => {
+    const profile = createDefaultProfile(); // 50_64, defaultRestSec 120
+    const unconsolidated = makeSessionExercise({
+      sets: [
+        {
+          id: 's1',
+          setNumber: 1,
+          targetWeight: 100,
+          targetRepsMin: 10,
+          targetRepsMax: 15,
+          targetRir: 2,
+          weight: 100,
+          reps: 15,
+          rir: 2,
+          painScore: 0,
+          completed: true,
+        },
+        {
+          id: 's2',
+          setNumber: 2,
+          targetWeight: 100,
+          targetRepsMin: 10,
+          targetRepsMax: 15,
+          targetRir: 2,
+          weight: 100,
+          reps: 11,
+          rir: 1,
+          painScore: 0,
+          completed: true,
+        },
+      ],
+    });
+
+    const next = calculateNextExercisePrescription(unconsolidated, undefined, 2, profile);
+    expect(next.targetWeight).toBe(100);
+    expect(next.weightIncreasedThisWeek).toBe(false);
+    expect(next.coachNote).toContain('Tendon-safe progression');
+
+    const press = BUILTIN_EXERCISES.find((e) => e.id === 'machine_chest_press')!;
+    const lateral = BUILTIN_EXERCISES.find((e) => e.id === 'cable_lateral_raise')!;
+    expect(getRecommendedRestSeconds(press, profile)).toBe(150);
+    expect(getRecommendedRestSeconds(lateral, profile)).toBe(90);
   });
 });

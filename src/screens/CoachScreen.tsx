@@ -9,7 +9,7 @@ import { useMemo } from 'react';
 import { JOINT_LABELS, JOINT_STATUS_LABELS, MUSCLE_LABELS } from '../data/constants';
 import { shouldSuggestDeloadOrRecovery } from '../engine/feedback';
 import { assessExerciseSafety, recommendJointFriendlySwaps } from '../engine/injuryAdvisor';
-import { getAdaptedLandmarks } from '../engine/landmarks';
+import { getAdaptedLandmarks, getMaxSessionSetsPerMuscle } from '../engine/landmarks';
 import {
   AthleteProfile,
   ExerciseDefinition,
@@ -123,6 +123,23 @@ export function CoachScreen({
     [meso, profile]
   );
 
+  const junkVolumeWarnings = useMemo(() => {
+    const cap = getMaxSessionSetsPerMuscle(profile);
+    const alerts: { dayName: string; muscle: MuscleGroup; sets: number; cap: number }[] = [];
+    for (const sess of currentWeekSessions) {
+      const perMuscle = new Map<MuscleGroup, number>();
+      for (const ex of sess.exercises) {
+        perMuscle.set(ex.muscle, (perMuscle.get(ex.muscle) ?? 0) + ex.numSets);
+      }
+      for (const [muscle, sets] of perMuscle.entries()) {
+        if (sets > cap) {
+          alerts.push({ dayName: sess.dayName, muscle, sets, cap });
+        }
+      }
+    }
+    return alerts;
+  }, [currentWeekSessions, profile]);
+
   const activeJoints = (Object.keys(profile.joints) as JointRegion[]).filter(
     (j) => profile.joints[j].status !== 'healthy'
   );
@@ -215,21 +232,41 @@ export function CoachScreen({
           </div>
         ))}
 
+        {junkVolumeWarnings.map((w) => (
+          <div
+            key={`${w.dayName}-${w.muscle}`}
+            className="rounded-2xl border border-amber-500/40 bg-amber-500/12 p-3.5 text-xs"
+          >
+            <div className="font-bold text-amber-300">
+              Per-Session Volume Check: {MUSCLE_LABELS[w.muscle]} ({w.sets} sets in {w.dayName})
+            </div>
+            <p className="mt-1 text-slate-200">
+              Exceeds your {w.cap}-set single-session productive cap. Splitting volume across 2–3 weekly sessions triggers better growth with less tendon inflammation than marathon single-day sets.
+            </p>
+          </div>
+        ))}
+
         {/* Masters / Older Lifter Evidence-Based Science Tips */}
         <div className="rounded-2xl border border-slate-800 bg-[#0B0E14] p-3.5 text-xs space-y-2">
           <div className="flex items-center gap-1.5 font-bold text-emerald-300">
             <ShieldCheck className="h-4 w-4" />
-            Older-Lifter Hypertrophy Best Practices Active
+            Masters Bodybuilding & Injury Best Practices
           </div>
           <ul className="list-disc space-y-1.5 pl-4 text-slate-300">
             <li>
-              <strong>Equivalent Growth at Moderate Loads:</strong> Working in 10–20+ rep ranges near 1–2 RIR triggers equal hypertrophy to heavy 5-rep sets while cutting peak tendon & joint shear by ~25–35%.
+              <strong>Pre-Warm Before Compounds:</strong> Putting seated leg curls before leg presses (or face pulls/flyes before pressing) pumps blood into knees and shoulders before heavy loading.
             </li>
             <li>
-              <strong>3-Second Controlled Eccentrics:</strong> Slowing negatives strengthens collagen tendon remodeling and lowers acute tear risk.
+              <strong>Lengthened Tension vs. Pain-Free Active ROM:</strong> Pause 1s in a deep stretch when healthy; stop 10–15° shy of pinching when a joint is flagged.
             </li>
             <li>
-              <strong>Anabolic Resistance Nutrition Tip:</strong> Aim for ~0.40–0.50 g/kg high-leucine protein per meal (3–4 feedings/day) and 48–72h between heavy sessions for the same joint chain.
+              <strong>Tendon-Safe Rep Consolidation:</strong> For 50+ or tempo-guarded lifts, hold load until every working set consolidates near the rep ceiling before bumping weight.
+            </li>
+            <li>
+              <strong>1–2 RIR Proximity & 10–20+ Reps:</strong> Delivers ~95–100% of hypertrophy stimulus while slashing joint shear and CNS wear vs. 5-rep max grinding.
+            </li>
+            <li>
+              <strong>Leucine Dosing & 4–5 Week Blocks:</strong> Aim for ~0.40–0.50 g/kg high-leucine protein per meal (3–4×/day) and deload every 4–5 weeks so connective tissue clears fatigue.
             </li>
           </ul>
         </div>

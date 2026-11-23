@@ -5,6 +5,7 @@ import {
   SessionExercise,
   SetLog,
 } from '../types/models';
+import { getMaxSetsPerExercise } from './landmarks';
 
 export interface DownSetSuggestion {
   targetWeight: number;
@@ -109,11 +110,55 @@ export function generateWarmupSets(
   return warmups;
 }
 
+const ISOLATION_SWAP_GROUPS = new Set([
+  'lateral_raise',
+  'biceps_curl',
+  'triceps_pushdown',
+  'rear_delt',
+  'calf_straight',
+  'abs_flexion',
+  'front_delt_iso',
+  'lat_isolation',
+  'quad_isolation',
+  'hamstring_curl',
+  'glute_iso',
+  'upper_back_iso',
+]);
+
+/**
+ * Computes evidence-based rest intervals:
+ * - Multi-joint / axial compounds: 150s+ for Masters (50+) so cardiovascular fatigue never breaks form.
+ * - Low-stress isolations: 75-90s to keep session duration compact without losing stimulus.
+ */
+export function getRecommendedRestSeconds(
+  exercise: Pick<ExerciseDefinition, 'axialLoad' | 'swapGroup'> | undefined,
+  profile: Pick<AthleteProfile, 'ageTier' | 'defaultRestSec'>
+): number {
+  if (!exercise) return profile.defaultRestSec;
+  const isOlder = profile.ageTier === '50_64' || profile.ageTier === '65_plus';
+
+  if (ISOLATION_SWAP_GROUPS.has(exercise.swapGroup) && exercise.axialLoad === 'none') {
+    return Math.max(75, Math.min(profile.defaultRestSec, 90));
+  }
+
+  const isMultiJoint =
+    exercise.axialLoad === 'high' ||
+    exercise.axialLoad === 'moderate' ||
+    /compound|press|row|pull|hinge|bridge/.test(exercise.swapGroup);
+
+  if (isMultiJoint) {
+    return Math.max(profile.defaultRestSec, isOlder ? 150 : 120);
+  }
+
+  return profile.defaultRestSec;
+}
+
 /**
  * Reverse-engineered Liftosaur RP v4.1 + Older-Lifter Pain-Monitoring progression engine.
  *
  * Traffic-light rules:
- * - Green (pain <= 2): Standard double/weight/rep progression. Never increases weight and sets simultaneously.
+ * - Green (pain <= 2): Standard double/weight/rep progression with tendon-safe set consolidation
+ *   for 50+ or tempo-guarded movements. Never increases weight and sets simultaneously.
  * - Amber (pain 3-4): Holds weight, shifts rep target +3 higher to drop peak joint torque, enforces 3s eccentric, caps sets.
  * - Red (pain >= 5): Cuts weight by 10%, drops 1 set, and flags a high-SFR joint-friendly swap.
  */
@@ -121,7 +166,7 @@ export function calculateNextExercisePrescription(
   prevExercise: SessionExercise,
   feedback: MuscleGroupFeedback | undefined,
   nextTargetRir: number,
-  _profile: Pick<AthleteProfile, 'ageTier' | 'autoDownSetMode'>,
+  profile: Pick<AthleteProfile, 'ageTier' | 'autoDownSetMode'>,
   _exerciseDef?: ExerciseDefinition
 ): NextExercisePrescription {
   const workingSets = prevExercise.sets.filter((s) => !s.isWarmup && !s.isDownSet);
@@ -148,6 +193,14 @@ export function calculateNextExercisePrescription(
     completedSets.length > 0
       ? Math.max(...completedSets.map((s) => s.reps ?? 0))
       : prevExercise.targetMinReps;
+
+  const minCompletedReps =
+    completedSets.length > 0
+      ? Math.min(...completedSets.map((s) => s.reps ?? 0))
+      : prevExercise.targetMinReps;
+
+  const isOlder = profile.ageTier === '50_64' || profile.ageTier === '65_plus';
+  const needsConsolidation = isOlder || Boolean(prevExercise.eccentricOverride);
 
   const rirEntries = completedSets
     .map((s) => s.rir)
@@ -220,10 +273,20 @@ export function calculateNextExercisePrescription(
 
   if (prevExercise.progressionType === 'double') {
     if (baseWeight > 0 && topReps >= prevExercise.targetMaxReps && rirMet) {
-      nextWeight = roundToIncrement(baseWeight + prevExercise.increment, prevExercise.increment);
-      nextSuggested = nextMin;
-      weightIncreased = true;
-      note = `Hit ceiling (${topReps} reps) — weight bumped +${prevExercise.increment}; reset reps to ${nextMin}.`;
+      if (
+        needsConsolidation &&
+        completedSets.length > 1 &&
+        minCompletedReps < prevExercise.targetMaxReps - 1
+      ) {
+        nextSuggested = Math.min(nextMax, Math.max(nextMin, avgReps + 1));
+        weightIncreased = false;
+        note = `Tendon-safe progression: Set 1 hit ceiling (${topReps}), now consolidate all sets to ${prevExercise.targetMaxReps - 1}+ reps at ${nextWeight} before adding load so tendon stiffness keeps pace with muscle strength.`;
+      } else {
+        nextWeight = roundToIncrement(baseWeight + prevExercise.increment, prevExercise.increment);
+        nextSuggested = nextMin;
+        weightIncreased = true;
+        note = `Hit ceiling (${topReps} reps) — weight bumped +${prevExercise.increment}; reset reps to ${nextMin}.`;
+      }
     } else {
       nextSuggested = Math.min(nextMax, Math.max(nextMin, avgReps + 1));
       note = `Hold ${nextWeight} and beat ${avgReps} reps (target ${nextSuggested} @ ${nextTargetRir} RIR).`;
@@ -258,7 +321,8 @@ export function calculateNextExercisePrescription(
     note += ` Reduced ${Math.abs(rawModifier)} set from workload/recovery feedback.`;
   }
 
-  const nextNumSets = Math.max(1, Math.min(8, prevExercise.numSets + effectiveModifier));
+  const maxSetsPerEx = getMaxSetsPerExercise(profile);
+  const nextNumSets = Math.max(1, Math.min(maxSetsPerEx, prevExercise.numSets + effectiveModifier));
 
   return {
     targetMinReps: nextMin,

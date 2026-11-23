@@ -8,6 +8,7 @@ import {
   SafetyLevel,
   SessionBriefing,
   SessionBriefingItem,
+  SessionExercise,
   SwapCandidate,
   WorkoutSession,
 } from '../types/models';
@@ -142,6 +143,20 @@ export function assessExerciseSafety(
       ? exercise.eccentricCue
       : `3s controlled eccentric — ${exercise.eccentricCue}`;
 
+  const romGuidance =
+    level === 'safe'
+      ? 'Lengthened-tension focus: control into a full stretch and pause 1s at the bottom (no bounce) to maximize stretch-mediated hypertrophy.'
+      : 'Pain-free active ROM: stop 10–15° before any joint pinch/clicking and pause 1s at your deepest 0-pain point — never force end-range stretch through discomfort.';
+
+  const finisherTip =
+    level === 'safe' &&
+    exercise.axialLoad === 'none' &&
+    (exercise.equipment === 'cable' ||
+      exercise.equipment === 'machine' ||
+      exercise.defaultRepRange.min >= 12)
+      ? 'Masters Joint-Saver Option: On your final set, rest 15s and add 3–5 Myo-reps instead of jumping plate weight.'
+      : undefined;
+
   return {
     level,
     score,
@@ -149,6 +164,8 @@ export function assessExerciseSafety(
     reasons,
     tempoCue,
     repRangeShift,
+    romGuidance,
+    finisherTip,
   };
 }
 
@@ -303,4 +320,131 @@ export function generateSessionBriefing(
     items,
     deloadPrompt,
   };
+}
+
+const LOWER_HEAVY_GROUPS = new Set(['quad_compound', 'quad_unilateral', 'hip_hinge']);
+const UPPER_PRESS_GROUPS = new Set([
+  'horizontal_press_flat',
+  'horizontal_press_incline',
+  'vertical_press',
+]);
+const UPPER_WARMER_GROUPS = new Set([
+  'rear_delt',
+  'chest_fly',
+  'triceps_pushdown',
+  'horizontal_row',
+  'vertical_pull',
+]);
+
+/**
+ * Reorders a session using Masters bodybuilding joint-warming best practices
+ * (e.g., hamstring curls before heavy quad/leg presses, or rear-delt/fly/pull warmers
+ * before upper-body pressing when shoulders/elbows are flagged). Does not mutate input.
+ */
+export function optimizeSessionOrderForJoints(
+  exercises: SessionExercise[],
+  allExercises: ExerciseDefinition[],
+  profile: AthleteProfile
+): { exercises: SessionExercise[]; changed: boolean; summary: string } {
+  if (exercises.length < 2) {
+    return { exercises: [...exercises], changed: false, summary: '' };
+  }
+
+  const byId = new Map(allExercises.map((e) => [e.id, e]));
+  const isOlder = profile.ageTier === '50_64' || profile.ageTier === '65_plus';
+
+  const lowerJointFlagged =
+    profile.joints.knee?.status !== 'healthy' ||
+    profile.joints.hip?.status !== 'healthy' ||
+    profile.joints.lower_back?.status !== 'healthy';
+
+  const upperJointFlagged =
+    profile.joints.shoulder?.status !== 'healthy' ||
+    profile.joints.elbow?.status !== 'healthy';
+
+  let next = [...exercises];
+  const reasons: string[] = [];
+
+  // 1. Lower-body: place hamstring curls ahead of heavy quad/hinge compounds
+  if (isOlder || lowerJointFlagged) {
+    const firstHeavyIdx = next.findIndex((ex) => {
+      const def = byId.get(ex.exerciseId);
+      return def ? LOWER_HEAVY_GROUPS.has(def.swapGroup) : false;
+    });
+    if (firstHeavyIdx !== -1) {
+      const curlAfterIdx = next.findIndex((ex, idx) => {
+        if (idx <= firstHeavyIdx) return false;
+        const def = byId.get(ex.exerciseId);
+        return def?.swapGroup === 'hamstring_curl';
+      });
+      if (curlAfterIdx !== -1) {
+        const [curlEx] = next.splice(curlAfterIdx, 1);
+        next.splice(firstHeavyIdx, 0, curlEx);
+        reasons.push(
+          'Moved leg curls before heavy leg compounds to warm knees & stabilize hamstrings first.'
+        );
+      }
+    }
+  }
+
+  // 2. Upper-body: when shoulder or elbow is flagged, move a joint-friendly warmer before pressing
+  if (upperJointFlagged) {
+    const firstPressIdx = next.findIndex((ex) => {
+      const def = byId.get(ex.exerciseId);
+      return def ? UPPER_PRESS_GROUPS.has(def.swapGroup) : false;
+    });
+    if (firstPressIdx === 0) {
+      // Pick best warmer currently placed after first press: prefer rear_delt / chest_fly / triceps_pushdown, then row/pull
+      const preferredOrder = [
+        'rear_delt',
+        'chest_fly',
+        'triceps_pushdown',
+        'horizontal_row',
+        'vertical_pull',
+      ];
+      let warmerIdx = -1;
+      for (const group of preferredOrder) {
+        const idx = next.findIndex((ex, i) => {
+          if (i <= firstPressIdx) return false;
+          const def = byId.get(ex.exerciseId);
+          return def?.swapGroup === group && UPPER_WARMER_GROUPS.has(def.swapGroup);
+        });
+        if (idx !== -1) {
+          warmerIdx = idx;
+          break;
+        }
+      }
+
+      if (warmerIdx !== -1) {
+        const [warmerEx] = next.splice(warmerIdx, 1);
+        next.unshift(warmerEx);
+        const wDef = byId.get(warmerEx.exerciseId);
+        reasons.push(
+          `Moved ${wDef?.name ?? 'isolation warmer'} first to pump blood into shoulders/elbows before pressing.`
+        );
+      }
+    }
+  }
+
+  const changed = next.some((ex, idx) => ex.id !== exercises[idx]?.id);
+  return {
+    exercises: next,
+    changed,
+    summary: reasons.join(' '),
+  };
+}
+
+/**
+ * Checks whether a session would benefit from joint-warming exercise reordering.
+ */
+export function needsJointWarmingReorder(
+  session: WorkoutSession,
+  allExercises: ExerciseDefinition[],
+  profile: AthleteProfile
+): { recommended: boolean; summary: string } {
+  if (session.isDeload || session.status === 'completed') {
+    return { recommended: false, summary: '' };
+  }
+  const result = optimizeSessionOrderForJoints(session.exercises, allExercises, profile);
+  return { recommended: result.changed, summary: result.summary };
 }

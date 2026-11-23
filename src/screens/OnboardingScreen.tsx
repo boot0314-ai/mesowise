@@ -472,6 +472,9 @@ export function OnboardingScreen({
                   </button>
                 ))}
               </div>
+              <p className="mt-2 text-[11px] text-slate-400">
+                Tip: 4–5 weeks (3–4 build + 1 deload) is optimal for Masters tendon recovery.
+              </p>
             </div>
           </div>
         </div>
